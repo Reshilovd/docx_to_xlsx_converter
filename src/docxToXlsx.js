@@ -238,19 +238,46 @@ function buildAlignedRecords(lines) {
   return records;
 }
 
-function escapeHtml(text) {
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+function cellValueToRuns(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return [{ text: value, font: {} }];
+  if (typeof value === "number" || typeof value === "boolean") return [{ text: String(value), font: {} }];
+  if (value instanceof Date) return [{ text: value.toISOString(), font: {} }];
+  if (value.richText) {
+    return value.richText
+      .map((run) => ({ text: String(run.text || ""), font: { ...(run.font || {}) } }))
+      .filter((run) => run.text !== "");
+  }
+  if (value.text) return [{ text: String(value.text), font: {} }];
+  if (value.result != null) return [{ text: String(value.result), font: {} }];
+  return [{ text: String(value), font: {} }];
 }
 
-function buildSpanLine(value, className) {
-  const text = cellToText(value);
-  if (!text) return "";
-  return `<span class='${escapeHtml(className || "lang")}'>${escapeHtml(text)}</span>`;
+function escapeHtmlAttr(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function wrapRunsWithLangSpan(runs, className) {
+  const safeClass = escapeHtmlAttr(className || "lang");
+  return [
+    { text: `<span class="${safeClass}">`, font: {} },
+    ...runs,
+    { text: "</span>", font: {} },
+  ];
+}
+
+function buildSpanLine(value) {
+  const runs = cellValueToRuns(value);
+  if (!runs || runs.length === 0) return "";
+  return runsToCell(runs);
+}
+
+function isEmptyCellValue(value) {
+  return cellToText(value) === "";
 }
 
 function autoFit(worksheet) {
@@ -265,17 +292,6 @@ function autoFit(worksheet) {
     });
     column.width = max;
   });
-}
-
-function cellValueToText(value) {
-  if (value == null) return "";
-  if (typeof value === "string") return value.trim();
-  if (typeof value === "number" || typeof value === "boolean") return String(value).trim();
-  if (value instanceof Date) return value.toISOString();
-  if (value.richText) return value.richText.map((r) => String(r.text || "")).join("").trim();
-  if (value.text) return String(value.text).trim();
-  if (value.result != null) return String(value.result).trim();
-  return String(value).trim();
 }
 
 async function extractDocumentRecords(file) {
@@ -343,15 +359,17 @@ export async function convertDocxFilesToXlsxBlob(files, options = []) {
       });
       return;
     }
-    const merged = maps
+    const mergedRuns = maps
       .map((map, index) => {
         const value = map.get(key);
-        if (!value) return "";
-        return buildSpanLine(value, parsed.classNames[index] || `lang_${index + 1}`);
+        if (!value || isEmptyCellValue(value)) return [];
+        return wrapRunsWithLangSpan(
+          cellValueToRuns(buildSpanLine(value)),
+          parsed.classNames[index] || `lang_${index + 1}`
+        );
       })
-      .filter(Boolean)
-      .join("");
-    const row = sheet.addRow([merged]);
+      .flat();
+    const row = sheet.addRow([runsToCell(mergedRuns)]);
     row.getCell(1).alignment = { vertical: "top", wrapText: true };
   });
 
@@ -389,7 +407,7 @@ export async function convertCheckedXlsxToSpansBlob(file, classNames = []) {
     throw new Error("В XLSX не найден лист с данными.");
   }
 
-  const maxColumns = Math.max(await inspectXlsxColumns(file), classNames.length);
+  const maxColumns = await inspectXlsxColumns(file);
   if (maxColumns === 0) {
     throw new Error("В XLSX нет данных для объединения.");
   }
@@ -398,14 +416,15 @@ export async function convertCheckedXlsxToSpansBlob(file, classNames = []) {
   const outSheet = outWorkbook.addWorksheet("content");
 
   srcSheet.eachRow({ includeEmpty: false }, (row) => {
-    const merged = [];
+    const mergedRuns = [];
     for (let i = 1; i <= maxColumns; i += 1) {
-      const raw = cellValueToText(row.getCell(i).value);
-      if (!raw) continue;
-      const className = classNames[i - 1] || `lang_${i}`;
-      merged.push(`<span class='${escapeHtml(className)}'>${escapeHtml(raw)}</span>`);
+      const rawRuns = cellValueToRuns(row.getCell(i).value);
+      if (rawRuns.length === 0 || rawRuns.every((run) => run.text.trim() === "")) continue;
+      mergedRuns.push(
+        ...wrapRunsWithLangSpan(rawRuns, classNames[i - 1] || `lang_${i}`)
+      );
     }
-    outSheet.addRow([merged.join("")]);
+    outSheet.addRow([runsToCell(mergedRuns)]);
   });
 
   autoFit(outSheet);

@@ -16,19 +16,16 @@ function App() {
     "Шаг 1: загрузите DOCX и скачайте XLSX для ручной проверки."
   );
 
-  const inferClassCode = (fileName, index) => {
-    const base = fileName.replace(/\.docx$/i, "").toLowerCase();
-    const suffix = base.match(/[_-]([a-zа-я]{2,5})$/i);
-    if (suffix) {
-      return suffix[1];
-    }
-    return `lang_${index + 1}`;
-  };
-
   const onDocxFileChange = (event) => {
     const selectedFiles = Array.from(event.target.files || []);
     setDocxFiles(selectedFiles);
-    setClassCodes(selectedFiles.map((file, index) => inferClassCode(file.name, index)));
+    setClassCodes((prev) => {
+      const next = [];
+      for (let i = 0; i < selectedFiles.length; i += 1) {
+        next[i] = prev[i] || `lang_${i + 1}`;
+      }
+      return next;
+    });
     setMessage(
       selectedFiles.length > 0
         ? `Выбрано файлов: ${selectedFiles.length}`
@@ -90,11 +87,11 @@ function App() {
       setClassCodes((prev) => {
         const next = [];
         for (let i = 0; i < columns; i += 1) {
-          next[i] = (prev[i] || `lang_${i + 1}`).trim();
+          next[i] = prev[i] || `lang_${i + 1}`;
         }
         return next;
       });
-      setMessage(`Шаг 2: найдено колонок ${columns}. Укажите CSS-классы и запускайте склейку.`);
+      setMessage(`Шаг 2: найдено колонок ${columns}. Можно запускать склейку.`);
     } catch (error) {
       setMessage(`Ошибка чтения XLSX: ${error.message}`);
       setDetectedColumns(0);
@@ -110,17 +107,20 @@ function App() {
       setMessage("Поддерживается только .xlsx файл на шаге 2.");
       return;
     }
+    if (detectedColumns === 0) {
+      setMessage("В XLSX не найдены колонки для склейки.");
+      return;
+    }
     if (
-      detectedColumns === 0 ||
       classCodes.length !== detectedColumns ||
-      classCodes.some((code) => !code.trim())
+      classCodes.some((code) => !String(code || "").trim())
     ) {
-      setMessage("Укажите CSS-класс для каждой колонки из XLSX.");
+      setMessage("Укажите CSS-класс для каждой колонки.");
       return;
     }
 
     setIsConvertingSpans(true);
-    setMessage("Шаг 2: склеиваем проверенный XLSX в span...");
+    setMessage("Шаг 2: склеиваем проверенный XLSX с сохранением стилей...");
     try {
       const blob = await convertCheckedXlsxToSpansBlob(
         checkedXlsxFile,
@@ -146,7 +146,7 @@ function App() {
       <h1>DOCX to XLSX Converter</h1>
       <p className="description">
         Процесс разделен на 2 шага: сначала DOCX в XLSX (проверка вручную),
-        затем загрузка проверенного XLSX и склейка в один HTML `span`-блок.
+        затем загрузка проверенного XLSX и склейка в одну ячейку с форматированием Excel.
       </p>
 
       <div className="card">
@@ -166,7 +166,7 @@ function App() {
         {detectedColumns > 0
           ? Array.from({ length: detectedColumns }, (_, index) => (
               <label key={`class-${index}`} className="class-code-row">
-                <span>Колонка {index + 1}</span>
+                <span>Класс для колонки {index + 1}</span>
                 <input
                   type="text"
                   value={classCodes[index] || ""}
@@ -181,7 +181,7 @@ function App() {
             ))
           : null}
         <button type="button" onClick={onMergeCheckedXlsx} disabled={isConvertingSpans}>
-          {isConvertingSpans ? "Склеиваем..." : "Склеить в span XLSX"}
+          {isConvertingSpans ? "Склеиваем..." : "Склеить колонки в одну ячейку"}
         </button>
       </div>
 
