@@ -1,4 +1,4 @@
-import JSZip from "jszip";
+ import JSZip from "jszip";
 import ExcelJS from "exceljs";
 
 const getName = (n) => (n?.localName || n?.nodeName || "").split(":").pop();
@@ -149,20 +149,138 @@ function parseParagraph(pNode) {
   return runsToCell(runs);
 }
 
-function joinCells(values) {
-  const runs = [];
-  values.forEach((v, idx) => {
-    if (idx > 0) runs.push({ text: " | ", font: {} });
-    if (typeof v === "string") runs.push({ text: v, font: {} });
-    else if (v?.richText) runs.push(...v.richText.map((r) => ({ text: r.text, font: { ...(r.font || {}) } })));
+function isLikelyAnswerCode(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  return /^(\d{1,3}|[A-Za-zА-Яа-я]\d{1,3})[.)]?$/.test(normalized);
+}
+
+function combineCodeAndLabelCells(firstValue, secondValue) {
+  const firstText = cellToText(firstValue);
+  const secondText = cellToText(secondValue);
+  const firstIsCode = isLikelyAnswerCode(firstText);
+  const secondIsCode = isLikelyAnswerCode(secondText);
+
+  if (firstIsCode === secondIsCode) return null;
+
+  const codeValue = firstIsCode ? firstValue : secondValue;
+  const labelValue = firstIsCode ? secondValue : firstValue;
+  const codeRuns = cellValueToRuns(codeValue);
+  const labelRuns = cellValueToRuns(labelValue);
+
+  if (codeRuns.length === 0 || labelRuns.length === 0) return null;
+  return runsToCell([...codeRuns, { text: " ", font: {} }, ...labelRuns]);
+}
+
+function dedupeRowValues(values) {
+  const out = [];
+  const seen = new Set();
+  values.forEach((value) => {
+    const key = cellToText(value).replace(/\s+/g, " ").trim();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push(value);
   });
-  return runsToCell(runs);
+  return out;
+}
+
+function isCodeOnlyCell(value) {
+  return isLikelyAnswerCode(cellToText(value));
+}
+
+function hasInlineAnswerCode(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  return /^(\d{1,3}|[A-Za-zА-Яа-я]\d{1,3})\s*[-–—.)]\s*\S+/.test(normalized);
+}
+
+function mergeCodeLabelArrays(labels, codes) {
+  if (labels.length !== codes.length || labels.length === 0) return null;
+  const merged = [];
+  for (let i = 0; i < labels.length; i += 1) {
+    const label = labels[i];
+    const code = codes[i];
+    if (isCodeOnlyCell(label) || !isCodeOnlyCell(code)) return null;
+    const mergedCell = combineCodeAndLabelCells(label, code);
+    if (!mergedCell) return null;
+    merged.push(mergedCell);
+  }
+  return merged;
+}
+
+function shouldSkipCodeLabelMerge(labelValue) {
+  const text = cellToText(labelValue);
+  return (
+    !text ||
+    Boolean(extractQuestionCode(text)) ||
+    isAuxiliaryQuestionLine(text) ||
+    hasInlineAnswerCode(text)
+  );
+}
+
+function mergeAdjacentCodeLabelLines(values) {
+  const merged = [];
+  for (let i = 0; i < values.length; i += 1) {
+    const current = values[i];
+    const next = values[i + 1];
+    if (!next) {
+      merged.push(current);
+      continue;
+    }
+
+    const currentIsCode = isCodeOnlyCell(current);
+    const nextIsCode = isCodeOnlyCell(next);
+
+    if (currentIsCode && !nextIsCode && !shouldSkipCodeLabelMerge(next)) {
+      const pair = combineCodeAndLabelCells(current, next);
+      if (pair) {
+        merged.push(pair);
+        i += 1;
+        continue;
+      }
+    }
+
+    if (!currentIsCode && nextIsCode && !shouldSkipCodeLabelMerge(current)) {
+      const pair = combineCodeAndLabelCells(current, next);
+      if (pair) {
+        merged.push(pair);
+        i += 1;
+        continue;
+      }
+    }
+
+    merged.push(current);
+  }
+  return merged;
+}
+
+function detectStructuredCodeLabelColumns(rows) {
+  let rowsWithTwoValues = 0;
+  let codeInFirstCol = 0;
+  let codeInSecondCol = 0;
+
+  rows.forEach((row) => {
+    const first = row[0];
+    const second = row[1];
+    if (!first || !second) return;
+    const firstText = cellToText(first);
+    const secondText = cellToText(second);
+    if (!firstText || !secondText) return;
+    rowsWithTwoValues += 1;
+    if (isCodeOnlyCell(first) && !isCodeOnlyCell(second)) codeInFirstCol += 1;
+    if (!isCodeOnlyCell(first) && isCodeOnlyCell(second)) codeInSecondCol += 1;
+  });
+
+  if (rowsWithTwoValues < 2) return { enabled: false, codeColumnIndex: 0 };
+  const threshold = Math.max(2, Math.ceil(rowsWithTwoValues * 0.6));
+  if (codeInFirstCol >= threshold) return { enabled: true, codeColumnIndex: 0 };
+  if (codeInSecondCol >= threshold) return { enabled: true, codeColumnIndex: 1 };
+  return { enabled: false, codeColumnIndex: 0 };
 }
 
 function parseTable(tblNode) {
-  const lines = [];
-  direct(tblNode, "tr").forEach((row) => {
-    const values = direct(row, "tc")
+  const rows = direct(tblNode, "tr").map((row) =>
+    direct(row, "tc")
       .map((tc) => {
         const runs = [];
         direct(tc, "p").forEach((p, i) => {
@@ -174,10 +292,49 @@ function parseTable(tblNode) {
         });
         return runsToCell(runs);
       })
-      .filter((v) => (typeof v === "string" ? v.trim() !== "" : v?.richText?.length > 0));
-    if (values.length > 0) lines.push(...splitCellLines(joinCells(values)));
+      .filter((value) => {
+        return typeof value === "string" ? value.trim() !== "" : value?.richText?.length > 0;
+      })
+  );
+  const nonEmptyRows = rows.filter((row) => row.length > 0);
+  const { enabled: hasStructuredPair, codeColumnIndex } = detectStructuredCodeLabelColumns(nonEmptyRows);
+  const rawLines = [];
+
+  nonEmptyRows.forEach((rowValues) => {
+    const normalizedRow = dedupeRowValues(rowValues);
+    if (normalizedRow.length === 0) return;
+
+    if (hasStructuredPair && normalizedRow.length >= 2) {
+      const codeCell = normalizedRow[codeColumnIndex];
+      const labelCell = normalizedRow[codeColumnIndex === 0 ? 1 : 0];
+      const merged = combineCodeAndLabelCells(codeCell, labelCell);
+      if (merged) {
+        rawLines.push(...splitCellLines(merged));
+      } else {
+        rawLines.push(...splitCellLines(codeCell));
+        rawLines.push(...splitCellLines(labelCell));
+      }
+
+      normalizedRow.slice(2).forEach((value) => {
+        rawLines.push(...splitCellLines(value));
+      });
+      return;
+    }
+
+    for (let i = 0; i < normalizedRow.length; i += 1) {
+      const current = normalizedRow[i];
+      const next = normalizedRow[i + 1];
+      const merged = next ? combineCodeAndLabelCells(current, next) : null;
+      if (merged) {
+        rawLines.push(...splitCellLines(merged));
+        i += 1;
+      } else {
+        rawLines.push(...splitCellLines(current));
+      }
+    }
   });
-  return lines;
+
+  return hasStructuredPair ? rawLines : mergeAdjacentCodeLabelLines(rawLines);
 }
 
 function cellToText(cellValue) {
@@ -437,8 +594,16 @@ export const __testables = {
   extractQuestionCode,
   isAuxiliaryQuestionLine,
   buildAlignedRecords,
+  isLikelyAnswerCode,
+  hasInlineAnswerCode,
+  combineCodeAndLabelCells,
+  dedupeRowValues,
+  detectStructuredCodeLabelColumns,
+  mergeCodeLabelArrays,
+  mergeAdjacentCodeLabelLines,
   cellValueToRuns,
   wrapRunsWithLangSpan,
   runsToCell,
+  cellToText,
 };
 
