@@ -239,7 +239,7 @@ function buildAlignedRecords(lines) {
 }
 
 function cellValueToRuns(value) {
-  if (value == null) return "";
+  if (value == null) return [];
   if (typeof value === "string") return [{ text: value, font: {} }];
   if (typeof value === "number" || typeof value === "boolean") return [{ text: String(value), font: {} }];
   if (value instanceof Date) return [{ text: value.toISOString(), font: {} }];
@@ -272,7 +272,7 @@ function wrapRunsWithLangSpan(runs, className) {
 
 function buildSpanLine(value) {
   const runs = cellValueToRuns(value);
-  if (!runs || runs.length === 0) return "";
+  if (runs.length === 0) return "";
   return runsToCell(runs);
 }
 
@@ -363,10 +363,8 @@ export async function convertDocxFilesToXlsxBlob(files, options = []) {
       .map((map, index) => {
         const value = map.get(key);
         if (!value || isEmptyCellValue(value)) return [];
-        return wrapRunsWithLangSpan(
-          cellValueToRuns(buildSpanLine(value)),
-          parsed.classNames[index] || `lang_${index + 1}`
-        );
+        const rawRuns = cellValueToRuns(value);
+        return wrapRunsWithLangSpan(rawRuns, parsed.classNames[index] || `lang_${index + 1}`);
       })
       .flat();
     const row = sheet.addRow([runsToCell(mergedRuns)]);
@@ -433,4 +431,14 @@ export async function convertCheckedXlsxToSpansBlob(file, classNames = []) {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });
 }
+
+export const __testables = {
+  normalizeQuestionCode,
+  extractQuestionCode,
+  isAuxiliaryQuestionLine,
+  buildAlignedRecords,
+  cellValueToRuns,
+  wrapRunsWithLangSpan,
+  runsToCell,
+};
 
