@@ -86,6 +86,117 @@ function parseRun(runNode) {
   return text ? { text, font } : null;
 }
 
+function toRoman(num) {
+  const values = [
+    [1000, "M"],
+    [900, "CM"],
+    [500, "D"],
+    [400, "CD"],
+    [100, "C"],
+    [90, "XC"],
+    [50, "L"],
+    [40, "XL"],
+    [10, "X"],
+    [9, "IX"],
+    [5, "V"],
+    [4, "IV"],
+    [1, "I"],
+  ];
+  let n = Math.max(1, num);
+  let out = "";
+  values.forEach(([value, symbol]) => {
+    while (n >= value) {
+      out += symbol;
+      n -= value;
+    }
+  });
+  return out;
+}
+
+function toLetters(num, upper = false) {
+  let n = Math.max(1, num);
+  let out = "";
+  while (n > 0) {
+    n -= 1;
+    out = String.fromCharCode(97 + (n % 26)) + out;
+    n = Math.floor(n / 26);
+  }
+  return upper ? out.toUpperCase() : out;
+}
+
+function formatListNumber(number, fmt) {
+  switch ((fmt || "decimal").toLowerCase()) {
+    case "lowerletter":
+      return toLetters(number, false);
+    case "upperletter":
+      return toLetters(number, true);
+    case "lowerroman":
+      return toRoman(number).toLowerCase();
+    case "upperroman":
+      return toRoman(number);
+    default:
+      return String(number);
+  }
+}
+
+function parseNumberingXml(numberingXmlText) {
+  const xml = new DOMParser().parseFromString(numberingXmlText, "application/xml");
+  const abstractLevels = new Map();
+  const nums = new Map();
+
+  all(xml, "abstractNum").forEach((node) => {
+    const abstractId = node.getAttribute("w:abstractNumId") || node.getAttribute("abstractNumId");
+    if (!abstractId) return;
+    const levelMap = new Map();
+    direct(node, "lvl").forEach((lvlNode) => {
+      const ilvl = lvlNode.getAttribute("w:ilvl") || lvlNode.getAttribute("ilvl") || "0";
+      const numFmtNode = first(lvlNode, "numFmt");
+      const startNode = first(lvlNode, "start");
+      levelMap.set(String(ilvl), {
+        numFmt:
+          numFmtNode?.getAttribute("w:val") || numFmtNode?.getAttribute("val") || "decimal",
+        start: Number(startNode?.getAttribute("w:val") || startNode?.getAttribute("val") || "1") || 1,
+      });
+    });
+    abstractLevels.set(String(abstractId), levelMap);
+  });
+
+  all(xml, "num").forEach((node) => {
+    const numId = node.getAttribute("w:numId") || node.getAttribute("numId");
+    const absNode = first(node, "abstractNumId");
+    const abstractId = absNode?.getAttribute("w:val") || absNode?.getAttribute("val");
+    if (numId && abstractId) nums.set(String(numId), String(abstractId));
+  });
+
+  return { abstractLevels, nums };
+}
+
+function createListResolver(numberingXmlText) {
+  if (!numberingXmlText) {
+    return () => null;
+  }
+  const parsed = parseNumberingXml(numberingXmlText);
+  const counters = new Map();
+
+  return (pNode) => {
+    const pPr = first(pNode, "pPr");
+    const numPr = first(pPr, "numPr");
+    if (!numPr) return null;
+    const ilvlNode = first(numPr, "ilvl");
+    const numIdNode = first(numPr, "numId");
+    const ilvl = String(ilvlNode?.getAttribute("w:val") || ilvlNode?.getAttribute("val") || "0");
+    const numId = String(numIdNode?.getAttribute("w:val") || numIdNode?.getAttribute("val") || "");
+    if (!numId) return null;
+
+    const abstractId = parsed.nums.get(numId);
+    const levelConfig = parsed.abstractLevels.get(abstractId)?.get(ilvl) || { numFmt: "decimal", start: 1 };
+    const key = `${numId}:${ilvl}`;
+    const current = counters.has(key) ? counters.get(key) + 1 : levelConfig.start;
+    counters.set(key, current);
+    return `${formatListNumber(current, levelConfig.numFmt)}. `;
+  };
+}
+
 function mergeRuns(runs) {
   const out = [];
   runs.forEach((run) => {
@@ -144,8 +255,12 @@ function splitCellLines(cellValue) {
   );
 }
 
-function parseParagraph(pNode) {
+function parseParagraph(pNode, getListPrefix) {
   const runs = all(pNode, "r").map(parseRun).filter(Boolean);
+  if (typeof getListPrefix === "function") {
+    const prefix = getListPrefix(pNode);
+    if (prefix) runs.unshift({ text: prefix, font: {} });
+  }
   return runsToCell(runs);
 }
 
@@ -195,6 +310,7 @@ function hasInlineAnswerCode(text) {
 }
 
 function mergeCodeLabelArrays(labels, codes) {
+  if (!Array.isArray(labels) || !Array.isArray(codes)) return null;
   if (labels.length !== codes.length || labels.length === 0) return null;
   const merged = [];
   for (let i = 0; i < labels.length; i += 1) {
@@ -255,6 +371,9 @@ function mergeAdjacentCodeLabelLines(values) {
 }
 
 function detectStructuredCodeLabelColumns(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { enabled: false, codeColumnIndex: 0 };
+  }
   let rowsWithTwoValues = 0;
   let codeInFirstCol = 0;
   let codeInSecondCol = 0;
@@ -278,13 +397,15 @@ function detectStructuredCodeLabelColumns(rows) {
   return { enabled: false, codeColumnIndex: 0 };
 }
 
-function parseTable(tblNode) {
-  const rows = direct(tblNode, "tr").map((row) =>
-    direct(row, "tc")
+function parseTable(tblNode, getListPrefix) {
+  const rows = direct(tblNode, "tr").map((row) => {
+    const cells = direct(row, "tc");
+    if (!Array.isArray(cells) || cells.length === 0) return [];
+    return cells
       .map((tc) => {
         const runs = [];
         direct(tc, "p").forEach((p, i) => {
-          const value = parseParagraph(p);
+          const value = parseParagraph(p, getListPrefix);
           if (!value) return;
           if (i > 0) runs.push({ text: "\n", font: {} });
           if (typeof value === "string") runs.push({ text: value, font: {} });
@@ -294,15 +415,26 @@ function parseTable(tblNode) {
       })
       .filter((value) => {
         return typeof value === "string" ? value.trim() !== "" : value?.richText?.length > 0;
-      })
-  );
+      });
+  });
   const nonEmptyRows = rows.filter((row) => row.length > 0);
   const { enabled: hasStructuredPair, codeColumnIndex } = detectStructuredCodeLabelColumns(nonEmptyRows);
   const rawLines = [];
 
-  nonEmptyRows.forEach((rowValues) => {
-    const normalizedRow = dedupeRowValues(rowValues);
-    if (normalizedRow.length === 0) return;
+  for (let rowIndex = 0; rowIndex < nonEmptyRows.length; rowIndex += 1) {
+    const normalizedRow = dedupeRowValues(nonEmptyRows[rowIndex]);
+    if (normalizedRow.length === 0) continue;
+
+    const nextRow = nonEmptyRows[rowIndex + 1] ? dedupeRowValues(nonEmptyRows[rowIndex + 1]) : null;
+    if (nextRow && nextRow.length === normalizedRow.length && normalizedRow.length >= 2) {
+      const mergedParallelRows =
+        mergeCodeLabelArrays(normalizedRow, nextRow) || mergeCodeLabelArrays(nextRow, normalizedRow);
+      if (mergedParallelRows) {
+        mergedParallelRows.forEach((value) => rawLines.push(...splitCellLines(value)));
+        rowIndex += 1;
+        continue;
+      }
+    }
 
     if (hasStructuredPair && normalizedRow.length >= 2) {
       const codeCell = normalizedRow[codeColumnIndex];
@@ -318,7 +450,7 @@ function parseTable(tblNode) {
       normalizedRow.slice(2).forEach((value) => {
         rawLines.push(...splitCellLines(value));
       });
-      return;
+      continue;
     }
 
     for (let i = 0; i < normalizedRow.length; i += 1) {
@@ -332,7 +464,7 @@ function parseTable(tblNode) {
         rawLines.push(...splitCellLines(current));
       }
     }
-  });
+  }
 
   return hasStructuredPair ? rawLines : mergeAdjacentCodeLabelLines(rawLines);
 }
@@ -363,18 +495,23 @@ function buildAlignedRecords(lines) {
   let lineIdx = 0;
   let auxIdx = 0;
   let preface = 0;
+  let seenAnswerSignatures = new Set();
 
   lines.forEach((line) => {
     const text = cellToText(line);
     if (!text) return;
     const code = extractQuestionCode(text);
-    if (code) {
+    const numericCode = /^\d+$/.test(String(code || "")) ? Number(code) : null;
+    const shouldKeepAsAnswerLine =
+      currentCode && Number.isFinite(numericCode) && numericCode > 20;
+    if (code && !shouldKeepAsAnswerLine) {
       const occ = (occurrences.get(code) || 0) + 1;
       occurrences.set(code, occ);
       currentCode = code;
       currentOcc = occ;
       lineIdx = 0;
       auxIdx = 0;
+      seenAnswerSignatures = new Set();
       records.push({ key: `Q:${code}:${occ}:0`, value: line });
       return;
     }
@@ -384,6 +521,11 @@ function buildAlignedRecords(lines) {
         records.push({ key: `Q:${currentCode}:${currentOcc}:AUX:${auxIdx}`, value: line });
         return;
       }
+      const answerSignature = `${currentCode}|${text.replace(/\s+/g, " ").trim().toLowerCase()}`;
+      if (seenAnswerSignatures.has(answerSignature)) {
+        return;
+      }
+      seenAnswerSignatures.add(answerSignature);
       lineIdx += 1;
       records.push({ key: `Q:${currentCode}:${currentOcc}:${lineIdx}`, value: line });
       return;
@@ -408,6 +550,45 @@ function cellValueToRuns(value) {
   if (value.text) return [{ text: String(value.text), font: {} }];
   if (value.result != null) return [{ text: String(value.result), font: {} }];
   return [{ text: String(value), font: {} }];
+}
+
+function extractLeadingAnswerCodeInfo(value) {
+  const text = cellToText(value);
+  const match = text.match(/^(\d{1,3})([.)])?\s*/);
+  if (!match) return null;
+  const rest = text.slice(match[0].length).trim();
+  if (!rest) return null;
+  return { code: match[1], prefixLength: match[0].length };
+}
+
+function stripLeadingCharsFromValue(value, charsToStrip) {
+  if (!charsToStrip || charsToStrip <= 0) return value;
+  if (typeof value === "string") return value.slice(charsToStrip).trimStart();
+  if (!value?.richText) return value;
+
+  let remaining = charsToStrip;
+  const runs = [];
+  value.richText.forEach((run) => {
+    let text = String(run.text || "");
+    if (remaining > 0) {
+      if (text.length <= remaining) {
+        remaining -= text.length;
+        return;
+      }
+      text = text.slice(remaining);
+      remaining = 0;
+    }
+    if (text) runs.push({ text, font: { ...(run.font || {}) } });
+  });
+  const stripped = runsToCell(runs);
+  return typeof stripped === "string" ? stripped.trimStart() : stripped;
+}
+
+function shouldExtractCodeToFirstColumn(key, code) {
+  const tail = String(key || "").split(":").pop();
+  if (tail && /^\d+$/.test(tail) && Number(tail) > 0) return true;
+  if (tail === "0" && /^\d+$/.test(String(code || "")) && Number(code) <= 20) return true;
+  return false;
 }
 
 function escapeHtmlAttr(value) {
@@ -455,8 +636,10 @@ async function extractDocumentRecords(file) {
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   const xmlFile = zip.file("word/document.xml");
   if (!xmlFile) return [{ key: "P:1", value: "Document is empty." }];
+  const numberingFile = zip.file("word/numbering.xml");
 
   const xml = new DOMParser().parseFromString(await xmlFile.async("text"), "application/xml");
+  const getListPrefix = createListResolver(numberingFile ? await numberingFile.async("text") : null);
   const body = all(xml, "body")[0];
   if (!body) return [{ key: "P:1", value: "Document is empty." }];
 
@@ -464,10 +647,10 @@ async function extractDocumentRecords(file) {
   Array.from(body.childNodes || []).forEach((node) => {
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     const tag = getName(node);
-    if (tag === "p") lines.push(...splitCellLines(parseParagraph(node)));
+    if (tag === "p") lines.push(...splitCellLines(parseParagraph(node, getListPrefix)));
     if (tag === "tbl") {
-      const tableLines = parseTable(node);
-      if (tableLines.length > 0) {
+      const tableLines = parseTable(node, getListPrefix);
+      if (Array.isArray(tableLines) && tableLines.length > 0) {
         lines.push(...tableLines);
         lines.push("");
       }
@@ -510,7 +693,26 @@ export async function convertDocxFilesToXlsxBlob(files, options = []) {
 
   keys.forEach((key) => {
     if (mode === "columns") {
-      const row = sheet.addRow(maps.map((map) => map.get(key) || ""));
+      const values = maps.map((map) => map.get(key) || "");
+      let answerCode = "";
+      let normalizedValues = values;
+
+      const infos = values.map((value) => extractLeadingAnswerCodeInfo(value)).filter(Boolean);
+      if (infos.length > 0) {
+        const counts = new Map();
+        infos.forEach((info) => counts.set(info.code, (counts.get(info.code) || 0) + 1));
+        const candidateCode = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0][0];
+        if (shouldExtractCodeToFirstColumn(key, candidateCode)) {
+          answerCode = candidateCode;
+          normalizedValues = values.map((value) => {
+            const info = extractLeadingAnswerCodeInfo(value);
+            if (!info || info.code !== answerCode) return value;
+            return stripLeadingCharsFromValue(value, info.prefixLength);
+          });
+        }
+      }
+
+      const row = sheet.addRow([answerCode, ...normalizedValues]);
       row.eachCell((cell) => {
         cell.alignment = { vertical: "top", wrapText: true };
       });
@@ -551,7 +753,8 @@ export async function inspectXlsxColumns(file) {
     columnCount = Math.max(columnCount, row.actualCellCount || 0);
   });
 
-  return columnCount;
+  // Column A stores answer codes and must be excluded in step 2.
+  return Math.max(0, columnCount - 1);
 }
 
 export async function convertCheckedXlsxToSpansBlob(file, classNames = []) {
@@ -562,8 +765,8 @@ export async function convertCheckedXlsxToSpansBlob(file, classNames = []) {
     throw new Error("В XLSX не найден лист с данными.");
   }
 
-  const maxColumns = await inspectXlsxColumns(file);
-  if (maxColumns === 0) {
+  const mergeColumnsCount = await inspectXlsxColumns(file);
+  if (mergeColumnsCount === 0) {
     throw new Error("В XLSX нет данных для объединения.");
   }
 
@@ -572,14 +775,16 @@ export async function convertCheckedXlsxToSpansBlob(file, classNames = []) {
 
   srcSheet.eachRow({ includeEmpty: false }, (row) => {
     const mergedRuns = [];
-    for (let i = 1; i <= maxColumns; i += 1) {
-      const rawRuns = cellValueToRuns(row.getCell(i).value);
+    for (let i = 0; i < mergeColumnsCount; i += 1) {
+      const sourceColumnIndex = i + 2;
+      const rawRuns = cellValueToRuns(row.getCell(sourceColumnIndex).value);
       if (rawRuns.length === 0 || rawRuns.every((run) => run.text.trim() === "")) continue;
       mergedRuns.push(
-        ...wrapRunsWithLangSpan(rawRuns, classNames[i - 1] || `lang_${i}`)
+        ...wrapRunsWithLangSpan(rawRuns, classNames[i] || `lang_${i + 1}`)
       );
     }
-    outSheet.addRow([runsToCell(mergedRuns)]);
+    const answerCode = row.getCell(1).value || "";
+    outSheet.addRow([answerCode, runsToCell(mergedRuns)]);
   });
 
   autoFit(outSheet);
@@ -601,6 +806,9 @@ export const __testables = {
   detectStructuredCodeLabelColumns,
   mergeCodeLabelArrays,
   mergeAdjacentCodeLabelLines,
+  extractLeadingAnswerCodeInfo,
+  stripLeadingCharsFromValue,
+  shouldExtractCodeToFirstColumn,
   cellValueToRuns,
   wrapRunsWithLangSpan,
   runsToCell,

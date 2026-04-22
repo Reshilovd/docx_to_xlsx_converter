@@ -91,7 +91,7 @@ function App() {
         }
         return next;
       });
-      setMessage(`Шаг 2: найдено колонок ${columns}. Можно запускать склейку.`);
+      setMessage(`Шаг 2: найдено колонок для склейки ${columns} (без колонки кодов).`);
     } catch (error) {
       setMessage(`Ошибка чтения XLSX: ${error.message}`);
       setDetectedColumns(0);
@@ -161,7 +161,7 @@ function App() {
         <h2 className="section-title">Шаг 2. Проверенный XLSX → span</h2>
         <input type="file" accept=".xlsx" onChange={onCheckedXlsxChange} />
         {detectedColumns > 0 ? (
-          <p className="hint">Найдено колонок: {detectedColumns}</p>
+          <p className="hint">Найдено колонок для склейки (без кодов): {detectedColumns}</p>
         ) : null}
         {detectedColumns > 0
           ? Array.from({ length: detectedColumns }, (_, index) => (

@@ -100,4 +100,51 @@ describe("docxToXlsx helpers", () => {
     ]);
     expect(result).toEqual({ enabled: true, codeColumnIndex: 0 });
   });
+
+  test("mergeCodeLabelArrays handles matrix scale rows", () => {
+    const merged = __testables.mergeCodeLabelArrays(
+      [
+        "Совсем не нравится",
+        "Скорее не нравится",
+        "Ни нравится, ни не нравится",
+        "Скорее нравится",
+        "Очень нравится",
+      ],
+      ["1", "2", "3", "4", "5"]
+    );
+    expect(merged.map((v) => __testables.cellToText(v))).toEqual([
+      "1 Совсем не нравится",
+      "2 Скорее не нравится",
+      "3 Ни нравится, ни не нравится",
+      "4 Скорее нравится",
+      "5 Очень нравится",
+    ]);
+  });
+
+  test("extractLeadingAnswerCodeInfo detects numeric answer code prefix", () => {
+    expect(__testables.extractLeadingAnswerCodeInfo("12 Астана")).toEqual({
+      code: "12",
+      prefixLength: 3,
+    });
+    expect(__testables.extractLeadingAnswerCodeInfo("1)Русский")).toEqual({
+      code: "1",
+      prefixLength: 2,
+    });
+    expect(__testables.extractLeadingAnswerCodeInfo("2.Эркек")).toEqual({
+      code: "2",
+      prefixLength: 2,
+    });
+    expect(__testables.extractLeadingAnswerCodeInfo("3")).toBeNull();
+    expect(__testables.extractLeadingAnswerCodeInfo("A1. Вопрос")).toBeNull();
+  });
+
+  test("stripLeadingCharsFromValue removes code prefix from string", () => {
+    expect(__testables.stripLeadingCharsFromValue("2 СВЕРИТЬ КВОТУ", 2)).toBe("СВЕРИТЬ КВОТУ");
+  });
+
+  test("shouldExtractCodeToFirstColumn allows option-like zero lines", () => {
+    expect(__testables.shouldExtractCodeToFirstColumn("Q:1:1:0", "1")).toBe(true);
+    expect(__testables.shouldExtractCodeToFirstColumn("Q:125:1:0", "125")).toBe(false);
+    expect(__testables.shouldExtractCodeToFirstColumn("Q:A1:1:1", "1")).toBe(true);
+  });
 });
