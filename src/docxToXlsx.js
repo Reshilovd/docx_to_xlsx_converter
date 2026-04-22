@@ -185,12 +185,26 @@ function cellToText(cellValue) {
   return (cellValue?.richText || []).map((r) => String(r.text || "")).join("").trim();
 }
 
+function isAuxiliaryQuestionLine(text) {
+  const normalized = text.trim();
+  if (!normalized) return false;
+
+  // Instructions like "(choose one answer)" should not shift answer alignment.
+  if (/^\([^()]{3,}\)$/.test(normalized)) return true;
+
+  // Section titles are often embedded between questions and should not shift answers.
+  if (/^(блок|block)\b/i.test(normalized)) return true;
+
+  return false;
+}
+
 function buildAlignedRecords(lines) {
   const records = [];
   const occurrences = new Map();
   let currentCode = null;
   let currentOcc = 0;
   let lineIdx = 0;
+  let auxIdx = 0;
   let preface = 0;
 
   lines.forEach((line) => {
@@ -203,10 +217,16 @@ function buildAlignedRecords(lines) {
       currentCode = code;
       currentOcc = occ;
       lineIdx = 0;
+      auxIdx = 0;
       records.push({ key: `Q:${code}:${occ}:0`, value: line });
       return;
     }
     if (currentCode) {
+      if (isAuxiliaryQuestionLine(text)) {
+        auxIdx += 1;
+        records.push({ key: `Q:${currentCode}:${currentOcc}:AUX:${auxIdx}`, value: line });
+        return;
+      }
       lineIdx += 1;
       records.push({ key: `Q:${currentCode}:${currentOcc}:${lineIdx}`, value: line });
       return;
@@ -245,6 +265,17 @@ function autoFit(worksheet) {
     });
     column.width = max;
   });
+}
+
+function cellValueToText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value).trim();
+  if (value instanceof Date) return value.toISOString();
+  if (value.richText) return value.richText.map((r) => String(r.text || "")).join("").trim();
+  if (value.text) return String(value.text).trim();
+  if (value.result != null) return String(value.result).trim();
+  return String(value).trim();
 }
 
 async function extractDocumentRecords(file) {
@@ -331,6 +362,54 @@ export async function convertDocxFilesToXlsxBlob(files, options = []) {
 
   autoFit(sheet);
   const bytes = await workbook.xlsx.writeBuffer();
+  return new Blob([bytes], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+}
+
+export async function inspectXlsxColumns(file) {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(await file.arrayBuffer());
+  const sheet = workbook.worksheets[0];
+  if (!sheet) return 0;
+
+  let columnCount = 0;
+  sheet.eachRow({ includeEmpty: false }, (row) => {
+    columnCount = Math.max(columnCount, row.actualCellCount || 0);
+  });
+
+  return columnCount;
+}
+
+export async function convertCheckedXlsxToSpansBlob(file, classNames = []) {
+  const srcWorkbook = new ExcelJS.Workbook();
+  await srcWorkbook.xlsx.load(await file.arrayBuffer());
+  const srcSheet = srcWorkbook.worksheets[0];
+  if (!srcSheet) {
+    throw new Error("В XLSX не найден лист с данными.");
+  }
+
+  const maxColumns = Math.max(await inspectXlsxColumns(file), classNames.length);
+  if (maxColumns === 0) {
+    throw new Error("В XLSX нет данных для объединения.");
+  }
+
+  const outWorkbook = new ExcelJS.Workbook();
+  const outSheet = outWorkbook.addWorksheet("content");
+
+  srcSheet.eachRow({ includeEmpty: false }, (row) => {
+    const merged = [];
+    for (let i = 1; i <= maxColumns; i += 1) {
+      const raw = cellValueToText(row.getCell(i).value);
+      if (!raw) continue;
+      const className = classNames[i - 1] || `lang_${i}`;
+      merged.push(`<span class='${escapeHtml(className)}'>${escapeHtml(raw)}</span>`);
+    }
+    outSheet.addRow([merged.join("")]);
+  });
+
+  autoFit(outSheet);
+  const bytes = await outWorkbook.xlsx.writeBuffer();
   return new Blob([bytes], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });
